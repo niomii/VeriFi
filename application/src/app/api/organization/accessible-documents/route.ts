@@ -1,0 +1,105 @@
+import { NextResponse } from 'next/server';
+import { db } from '@/db';
+import { documents, access, organizations } from '@/db/schema';
+import { eq, and, or } from 'drizzle-orm';
+
+export async function GET(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const userId = searchParams.get('organizationId');
+    console.log('Fetching documents for organization user ID:', userId);
+
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Organization ID is required' },
+        { status: 400 }
+      );
+    }
+
+    // Get organization by user ID
+    const org = await db
+      .select()
+      .from(organizations)
+      .where(eq(organizations.user_id, userId));
+
+    console.log('Found organization:', org[0]);
+
+    if (org.length === 0) {
+      return NextResponse.json(
+        { error: 'Organization not found' },
+        { status: 404 }
+      );
+    }
+
+    const now = new Date();
+    console.log('Current time:', now.toISOString());
+
+    // Get all approved access requests
+    const accessibleDocs = await db
+      .select({
+        id: documents.document_id,
+        documentId: documents.document_id,
+        name: documents.document_name,
+        url: documents.url,
+        requestTime: access.request_time,
+        accessDuration: access.access_duration,
+        status: access.status,
+        orgId: access.organization_id,
+      })
+      .from(access)
+      .innerJoin(documents, eq(access.document_id, documents.document_id))
+      .where(
+        and(
+          eq(access.organization_id, org[0].organization_id),
+          or(eq(access.status, 'approved'), eq(access.status, 'approve'))
+        )
+      );
+
+    console.log('Found access records:', accessibleDocs);
+
+    // Filter out expired documents and format dates
+    const formattedDocs = accessibleDocs
+      .map((doc) => {
+        console.log('Processing doc:', doc);
+        const requestTime = doc.requestTime;
+        if (!requestTime) {
+          console.log('No request time for doc:', doc.id);
+          return null;
+        }
+
+        // Parse duration (e.g., "24 hours" -> 24)
+        const durationHours = parseInt(doc.accessDuration.split(' ')[0]);
+        if (isNaN(durationHours)) {
+          console.log('Invalid duration for doc:', doc.id, doc.accessDuration);
+          return null;
+        }
+
+        // Calculate expiration time
+        const expiresAt = new Date(requestTime);
+        expiresAt.setHours(expiresAt.getHours() + durationHours);
+        console.log('Doc', doc.id, 'expires at:', expiresAt.toISOString());
+
+        // Skip if expired
+        if (expiresAt <= now) {
+          console.log('Doc', doc.id, 'has expired');
+          return null;
+        }
+
+        return {
+          ...doc,
+          requestTime: requestTime.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+        };
+      })
+      .filter(Boolean); // Remove null entries
+
+    console.log('Returning formatted docs:', formattedDocs);
+    return NextResponse.json(formattedDocs);
+  } catch (error) {
+    console.error('Error fetching accessible documents:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch accessible documents' },
+      { status: 500 }
+    );
+  }
+}
